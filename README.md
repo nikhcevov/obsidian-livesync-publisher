@@ -59,6 +59,35 @@ blog.example.com {
 }
 ```
 
+## LiveSync compatibility
+
+The publisher reads CouchDB documents directly; it does not call the Obsidian plug-in API.
+The plaintext note/chunk contract was checked against [LiveSync 1.0.0](https://github.com/vrtmrz/obsidian-livesync/releases/tag/1.0.0)
+and [1.0.35](https://github.com/vrtmrz/obsidian-livesync/releases/tag/1.0.35), which pin
+`@vrtmrz/livesync-commonlib` 0.1.0 and 0.1.36 respectively. No breaking change to that content schema was found.
+
+- Markdown metadata uses `type: plain`; image metadata uses `type: newnote`.
+- Content follows `children` order, including repeated chunk IDs.
+- Embedded `eden[id].data` takes precedence over standalone `type: leaf` documents.
+- Referenced standalone chunk arrivals reprocess the owning notes or posts using an image,
+  even without another metadata revision. Dependencies are rebuilt on publisher startup.
+- Empty content is valid; clearing a published note removes it because its publication gate is absent.
+
+LiveSync [1.0.33 documents a metadata-before-chunk arrival issue](https://github.com/vrtmrz/obsidian-livesync/blob/1.0.35/updates.md#L82-L84).
+Previously, the publisher stopped trying after its short chunk lookup retry and ignored subsequent
+chunk notifications, leaving the published page stale. It also ignored embedded `eden` content.
+These were publisher compatibility gaps, not a newly introduced `eden` format.
+
+**Required storage settings:** use an unencrypted, unobfuscated CouchDB remote with uncompressed
+stored content. E2EE, property/path obfuscation, compressed content, and chunk-pack decoding are
+not supported. Turning a setting off does not rewrite content already stored using it; existing
+encoded data must be migrated with LiveSync's supported procedures before this publisher can read it.
+Object Storage and P2P alone do not supply this publisher's CouchDB feed.
+
+After deploying an updated publisher, make a small edit to an affected note to republish it.
+An existing checkpoint prevents a full content rebuild on restart. If edits never reach CouchDB,
+investigate the Obsidian/LiveSync connection separately; the publisher cannot restore client sync status.
+
 ## Publishing rules
 
 Posts are any vault markdown note with `post_published: true` in frontmatter.

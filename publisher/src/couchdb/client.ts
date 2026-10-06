@@ -1,7 +1,7 @@
 import nano, { type DocumentScope, type ServerScope } from "nano";
 import { config } from "../config.js";
 import { log } from "../logger.js";
-import type { EntryLeaf, MetaDoc } from "../extractor/types.js";
+import type { Eden, EntryLeaf, MetaDoc } from "../extractor/types.js";
 
 const RETRY_DELAYS = [500, 1000, 2000, 5000];
 
@@ -154,10 +154,18 @@ export async function bulkGetLeaves(
 
 export async function fetchLeavesOrdered(
   childIds: string[],
+  eden: Eden = {},
   retry = true,
 ): Promise<EntryLeaf[]> {
   const byId = new Map<string, EntryLeaf>();
-  const leaves = await bulkGetLeaves(childIds);
+  for (const id of childIds) {
+    const embedded = eden[id];
+    if (typeof embedded?.data === "string") {
+      byId.set(id, { _id: id, type: "leaf", data: embedded.data });
+    }
+  }
+  const externalIds = [...new Set(childIds.filter((id) => !byId.has(id)))];
+  const leaves = await bulkGetLeaves(externalIds);
   for (const leaf of leaves) byId.set(leaf._id, leaf);
 
   const ordered: EntryLeaf[] = [];
@@ -172,7 +180,7 @@ export async function fetchLeavesOrdered(
     if (retry) {
       log.warn({ missing: missing.length }, "chunks_missing_retry");
       await sleep(500);
-      return fetchLeavesOrdered(childIds, false);
+      return fetchLeavesOrdered(childIds, eden, false);
     }
     throw new Error(`Missing chunks: ${missing.join(", ")}`);
   }

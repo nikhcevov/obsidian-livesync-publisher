@@ -1,8 +1,9 @@
 import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "./config.js";
-import { classifyDoc } from "./extractor/filter.js";
+import { classifyDoc, isChunkId } from "./extractor/filter.js";
 import { ImageIndex } from "./extractor/imageIndex.js";
+import type { DocClass, Eden } from "./extractor/types.js";
 import { reconstructText } from "./extractor/reconstruct.js";
 import { getDoc, listAllDocIds } from "./couchdb/client.js";
 import { log } from "./logger.js";
@@ -25,6 +26,8 @@ export class Publisher {
   readonly imageIndex = new ImageIndex();
   private debouncer: Debouncer;
   private postPaths = new Map<string, string>();
+  private chunkParents = new Map<string, Set<string>>();
+  private docChunks = new Map<string, { kind: DocClass; children: string[] }>();
 
   constructor() {
     this.debouncer = new Debouncer(
@@ -61,9 +64,26 @@ export class Publisher {
     deleted: boolean;
     doc?: Record<string, unknown>;
   }): Promise<void> {
+    if (isChunkId(change.id)) {
+      const parents = this.chunkParents.get(change.id);
+      if (!parents) return;
+      for (const parentId of parents) {
+        if (this.docChunks.get(parentId)?.kind === "post") {
+          this.schedule(parentId);
+        } else {
+          const posts = this.imageIndex.getPostsForImage(parentId);
+          for (const postId of posts.length > 0 ? posts : this.postPaths.keys()) {
+            this.schedule(postId);
+          }
+        }
+      }
+      return;
+    }
+
     log.info({ id: change.id, deleted: change.deleted }, "change_received");
 
     if (change.deleted) {
+      this.trackChunkParents(change.id);
       const docPath =
         typeof change.doc?.path === "string" ? change.doc.path : undefined;
       const path =
@@ -90,6 +110,7 @@ export class Publisher {
     }
 
     const kind = classifyDoc(doc);
+    this.trackChunkParents(change.id, doc);
     if (kind === "image") {
       const path = String(doc.path);
       this.imageIndex.upsert(change.id, path);
@@ -106,6 +127,37 @@ export class Publisher {
     }
   }
 
+  private trackChunkParents(
+    docId: string,
+    doc?: Record<string, unknown>,
+  ): void {
+    for (const child of this.docChunks.get(docId)?.children ?? []) {
+      const parents = this.chunkParents.get(child);
+      parents?.delete(docId);
+      if (parents?.size === 0) this.chunkParents.delete(child);
+    }
+    this.docChunks.delete(docId);
+
+    const kind = doc ? classifyDoc(doc) : "ignored";
+    if (!doc || kind === "ignored") return;
+    const eden = doc.eden as Eden | undefined;
+    const children = Array.isArray(doc.children)
+      ? doc.children.filter(
+          (id): id is string =>
+            typeof id === "string" && typeof eden?.[id]?.data !== "string",
+        )
+      : [];
+    this.docChunks.set(docId, { kind, children });
+    for (const child of children) {
+      let parents = this.chunkParents.get(child);
+      if (!parents) {
+        parents = new Set();
+        this.chunkParents.set(child, parents);
+      }
+      parents.add(docId);
+    }
+  }
+
   private async seedImageIndex(): Promise<void> {
     const ids = await listAllDocIds();
     log.info({ count: ids.length }, "bootstrap_scan");
@@ -113,6 +165,7 @@ export class Publisher {
       const doc = await getDoc(id);
       if (!doc) continue;
       if (classifyDoc(doc) === "image") {
+        this.trackChunkParents(id, doc);
         this.imageIndex.upsert(id, String(doc.path));
       }
     }
@@ -124,6 +177,7 @@ export class Publisher {
       const doc = await getDoc(id);
       if (!doc) continue;
       if (classifyDoc(doc) === "post") {
+        this.trackChunkParents(id, doc);
         this.postPaths.set(id, String(doc.path));
       }
     }
@@ -137,6 +191,7 @@ export class Publisher {
 
   private async processDoc(docId: string): Promise<void> {
     const doc = await getDoc(docId);
+    this.trackChunkParents(docId, doc ?? undefined);
     if (!doc) {
       const path = this.postPaths.get(docId);
       if (path) await this.unpublishPost(docId, path);

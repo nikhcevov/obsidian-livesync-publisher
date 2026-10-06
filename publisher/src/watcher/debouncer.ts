@@ -7,6 +7,7 @@ type BuildHandler = () => Promise<void>;
 export class Debouncer {
   private docTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingDocs = new Set<string>();
+  private processingDocs = new Set<string>();
   private buildTimer: ReturnType<typeof setTimeout> | null = null;
   private buildRunning = false;
   private buildQueued = false;
@@ -30,13 +31,17 @@ export class Debouncer {
   }
 
   private async flushDoc(docId: string): Promise<void> {
-    if (!this.pendingDocs.has(docId)) return;
+    if (!this.pendingDocs.has(docId) || this.processingDocs.has(docId)) return;
     this.pendingDocs.delete(docId);
+    this.processingDocs.add(docId);
     try {
       await this.onDoc(docId);
       this.scheduleBuild();
     } catch (err) {
       log.error({ err, docId }, "doc_process_failed");
+    } finally {
+      this.processingDocs.delete(docId);
+      if (this.pendingDocs.has(docId)) this.scheduleDoc(docId);
     }
   }
 

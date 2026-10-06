@@ -18,6 +18,8 @@ export interface EntryLeaf {
   e_?: boolean;
 }
 
+export type Eden = Record<string, { data: string; epoch: number }>;
+
 export interface PlainEntry {
   _id: string;
   _rev?: string;
@@ -27,7 +29,7 @@ export interface PlainEntry {
   ctime?: number;
   mtime?: number;
   size?: number;
-  eden?: Record<string, unknown>;
+  eden?: Eden;
   _deleted?: boolean;
   _conflicts?: string[];
   deleted?: boolean;
@@ -42,6 +44,7 @@ export interface NewnoteEntry {
   ctime?: number;
   mtime?: number;
   size?: number;
+  eden?: Eden;
   _deleted?: boolean;
   _conflicts?: string[];
   deleted?: boolean;

@@ -11,13 +11,9 @@ export async function reconstructBinary(
 
   const meta = doc as NewnoteEntry;
   const children = meta.children ?? [];
-  if (children.length === 0) {
-    log.warn({ docId }, "newnote_no_children");
-    return null;
-  }
 
   try {
-    const leaves = await fetchLeavesOrdered(children);
+    const leaves = await fetchLeavesOrdered(children, meta.eden);
     const estimated = leaves.reduce((sum, l) => sum + l.data.length, 0);
     const estimatedBytes = Math.ceil((estimated * 3) / 4);
     if (estimatedBytes > config.maxImageBytes) {

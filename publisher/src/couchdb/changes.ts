@@ -54,6 +54,7 @@ export function startChangesFeed(
 ): { stop: () => void } {
   const db = getDb();
   let stopped = false;
+  let pending = Promise.resolve();
   const sinceVal = since ?? "now";
 
   db.changesReader
@@ -65,9 +66,9 @@ export function startChangesFeed(
     .on("change", (change: CouchChange) => {
       if (stopped) return;
       const id = change.id;
-      if (isChunkId(id)) return;
 
-      void (async () => {
+      pending = pending.then(async () => {
+        if (stopped) return;
         try {
           const doc = change.doc as Record<string, unknown> | undefined;
           const deleted = Boolean(
@@ -78,7 +79,7 @@ export function startChangesFeed(
         } catch (err) {
           log.error({ err, id }, "change_handler_error");
         }
-      })();
+      });
     })
     .on("error", (err: Error) => {
       log.error({ err }, "couch_disconnected");
@@ -100,5 +101,8 @@ export function shouldProcessChange(
 ): boolean {
   if (deleted || doc?._deleted || doc?.deleted) return true;
   if (!doc) return false;
+  if (typeof doc._id === "string" && isChunkId(doc._id)) {
+    return doc.type === "leaf";
+  }
   return classifyDoc(doc) !== "ignored";
 }

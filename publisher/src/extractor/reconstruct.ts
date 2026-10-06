@@ -34,13 +34,9 @@ export async function reconstructText(
 
   const plain = doc as PlainEntry;
   const children = plain.children ?? [];
-  if (children.length === 0) {
-    log.warn({ docId }, "plain_no_children");
-    return null;
-  }
 
   try {
-    const leaves = await fetchLeavesOrdered(children);
+    const leaves = await fetchLeavesOrdered(children, plain.eden);
     const text = leaves.map((l) => l.data).join("");
     return {
       text,
