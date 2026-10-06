@@ -47,6 +47,7 @@ services:
       COUCHDB_USER: admin
       COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:-changeme}
       COUCHDB_AUTO_CREATE: "true"
+      REBUILD_ON_START: "${REBUILD_ON_START:-false}"
       DEBOUNCE_MS: ${DEBOUNCE_MS:-4000}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       PUID: ${PUID:-1000}

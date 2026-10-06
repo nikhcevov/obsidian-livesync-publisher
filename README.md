@@ -84,9 +84,10 @@ not supported. Turning a setting off does not rewrite content already stored usi
 encoded data must be migrated with LiveSync's supported procedures before this publisher can read it.
 Object Storage and P2P alone do not supply this publisher's CouchDB feed.
 
-After deploying an updated publisher, make a small edit to an affected note to republish it.
-An existing checkpoint prevents a full content rebuild on restart. If edits never reach CouchDB,
-investigate the Obsidian/LiveSync connection separately; the publisher cannot restore client sync status.
+After deploying an updated publisher, use the recovery rebuild below or make a small edit to an
+affected note to republish it. By default, an existing checkpoint prevents a full content rebuild
+on restart. If edits never reach CouchDB, investigate the Obsidian/LiveSync connection separately;
+the publisher cannot restore client sync status.
 
 ## Publishing rules
 
@@ -125,6 +126,7 @@ slug: my-article
 | `COUCHDB_USER`        | no       | —                   | Username if not in URL                      |
 | `COUCHDB_PASSWORD`    | no       | —                   | Password if not in URL                      |
 | `COUCHDB_AUTO_CREATE` | no       | `false`             | Create DB on startup if missing (dev)       |
+| `REBUILD_ON_START`    | no       | `false`             | Reconcile generated content and run Hugo on every startup |
 | `DEBOUNCE_MS`         | no       | `4000`              | Debounce window for rebuilds                |
 | `LOG_LEVEL`           | no       | `info`              | Pino log level                              |
 | `IMAGE_URL_PREFIX`    | no       | `/img`              | URL prefix in rewritten markdown            |
@@ -135,6 +137,49 @@ slug: my-article
 | `HUGO_DEST`           | no       | `/public`           | Hugo output directory                       |
 | `CONTENT_DIR`         | no       | `/hugo/content`     | Generated post markdown directory           |
 | `IMAGE_DIR`           | no       | `/hugo/static/img`  | Extracted post images directory             |
+
+## Recovery rebuild
+
+Set `REBUILD_ON_START` when generated content is stale, missing, or damaged:
+
+```yaml
+environment:
+  REBUILD_ON_START: "true"
+```
+
+Recreate the publisher to apply the changed environment:
+
+```bash
+docker compose up -d --force-recreate livesync-publisher
+```
+
+A plain `docker restart` does not apply new environment settings. Once the container has
+`REBUILD_ON_START=true`, every startup performs the recovery rebuild. Set it back to `"false"`
+and recreate the container afterward if you only wanted a one-time recovery.
+
+The rebuild:
+
+- Regenerates published markdown and referenced images from current CouchDB content,
+  bypassing the image file cache.
+- Removes tracked output for deleted or unpublished notes and cleans up orphaned images.
+  Saved custom slugs are respected, including when a slug changes.
+- Reconstructs image reference counts from the saved ownership records.
+- Preserves the saved change checkpoint and replays changes, including edits arriving during
+  rebuilding. With no saved checkpoint, startup captures a sequence before scanning.
+- Runs Hugo before starting the change feed. A failed Hugo rebuild aborts startup without
+  advancing the checkpoint.
+
+Watch for `startup_rebuild_started` and `startup_rebuild_finished` in the logs.
+Conflicted or unreadable notes are skipped rather than deleting their previous published output.
+
+**Keep `/state`.** Reconciliation uses its post-reference records to identify publisher-owned
+posts and images; it does not wipe unrelated source files. Output without intact ownership
+records cannot be safely pruned. A damaged `refcount.json` can be regenerated, but malformed
+ownership records must be repaired or restored before rebuilding.
+
+Rebuilding does not modify CouchDB or recover edits that never reached it. With
+`REBUILD_ON_START=false`, checkpointed restarts retain the normal watch/resume behavior.
+The first startup without a checkpoint still rebuilds automatically.
 
 ## Volumes
 

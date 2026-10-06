@@ -47,7 +47,7 @@ export async function loadPostRefs(postDocId: string): Promise<PostRefs | null> 
   try {
     const raw = await readFile(refsPath(postDocId), "utf8");
     const data = JSON.parse(raw) as PostRefs;
-    return { images: data.images ?? [], files: data.files ?? [] };
+    return { images: data.images ?? [], files: data.files ?? [], slug: data.slug };
   } catch (err: unknown) {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") return null;
@@ -70,6 +70,7 @@ export async function loadAllRefsWithPostIds(): Promise<
         map.set(data.postDocId, {
           images: data.images ?? [],
           files: data.files ?? [],
+          slug: data.slug,
         });
       }
     }
@@ -78,6 +79,19 @@ export async function loadAllRefsWithPostIds(): Promise<
     if (e.code !== "ENOENT") throw err;
   }
   return map;
+}
+
+export async function rebuildImageRefcounts(): Promise<void> {
+  return runExclusive(async () => {
+    const refs = await loadAllRefsWithPostIds();
+    const counts: Record<string, number> = {};
+    for (const ref of refs.values()) {
+      for (const id of new Set(ref.images)) {
+        counts[id] = (counts[id] ?? 0) + 1;
+      }
+    }
+    await atomicWriteJson(refcountPath(), counts);
+  });
 }
 
 async function loadRefcount(): Promise<Record<string, number>> {

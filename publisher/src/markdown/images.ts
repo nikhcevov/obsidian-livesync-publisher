@@ -66,14 +66,17 @@ async function writeImageFile(
   filename: string,
   buffer: Buffer,
   mtime: number,
+  forceWrite: boolean,
 ): Promise<void> {
   await mkdir(config.imageDir, { recursive: true });
   const dest = join(config.imageDir, filename);
-  try {
-    const st = await stat(dest);
-    if (st.size === buffer.length && st.mtimeMs >= mtime) return;
-  } catch {
-    /* new file */
+  if (!forceWrite) {
+    try {
+      const st = await stat(dest);
+      if (st.size === buffer.length && st.mtimeMs >= mtime) return;
+    } catch {
+      /* new file */
+    }
   }
   const tmp = `${dest}.tmp`;
   await writeFile(tmp, buffer);
@@ -97,6 +100,7 @@ async function embedImageRef(
   imageDocIds: string[],
   files: string[],
   pending: string[],
+  forceWrite: boolean,
 ): Promise<string> {
   const docId = index.resolve(ref.src);
   if (!docId) {
@@ -109,7 +113,7 @@ async function embedImageRef(
   if (!binary) return result;
 
   const filename = imageFilename(binary.path);
-  await writeImageFile(filename, binary.buffer, binary.mtime);
+  await writeImageFile(filename, binary.buffer, binary.mtime, forceWrite);
   const url = publicUrl(filename);
   const replacement = `![${ref.alt}](${url})`;
 
@@ -122,6 +126,7 @@ async function embedImageRef(
 export async function processImages(
   markdown: string,
   index: ImageIndex,
+  forceWrite = false,
 ): Promise<ImageProcessResult> {
   const imageDocIds: string[] = [];
   const files: string[] = [];
@@ -136,6 +141,7 @@ export async function processImages(
       imageDocIds,
       files,
       pending,
+      forceWrite,
     );
   }
 
@@ -147,6 +153,7 @@ export async function processImages(
       imageDocIds,
       files,
       pending,
+      forceWrite,
     );
   }
 

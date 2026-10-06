@@ -61,6 +61,7 @@ export const config = {
   couchDbName: couch.couchDbName,
   couchHasAuth: couch.couchHasAuth,
   couchAutoCreate: parseBool("COUCHDB_AUTO_CREATE", false),
+  rebuildOnStart: parseBool("REBUILD_ON_START", false),
   debounceMs: parseIntEnv("DEBOUNCE_MS", 4000),
   publishGate: optional("PUBLISH_GATE", "frontmatter"),
   logLevel: optional("LOG_LEVEL", "info"),

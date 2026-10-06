@@ -42,6 +42,7 @@ async function main(): Promise<void> {
       database: config.couchDbName,
       hasAuth: config.couchHasAuth,
       autoCreate: config.couchAutoCreate,
+      rebuildOnStart: config.rebuildOnStart,
     },
     "couch_config",
   );
@@ -50,8 +51,8 @@ async function main(): Promise<void> {
   await verifyCouch();
 
   let since = await loadLastSeq();
-  const fullBootstrap = since === undefined;
-  if (fullBootstrap) {
+  const fullBootstrap = since === undefined || config.rebuildOnStart;
+  if (since === undefined) {
     since = await getCurrentSeq();
     log.info({ since }, "bootstrap_seq");
   }

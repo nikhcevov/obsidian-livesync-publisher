@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -8,9 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Each case reloads config after setting isolated filesystem paths; static imports
 // would retain another case's environment-backed module singleton.
 
-const { docs, reader } = vi.hoisted(() => ({
+const { docs, reader, build } = vi.hoisted(() => ({
   docs: new Map<string, Record<string, unknown>>(),
   reader: { start: vi.fn(), stop: vi.fn() },
+  build: vi.fn(),
 }));
 
 vi.mock("nano", () => ({
@@ -18,6 +19,7 @@ vi.mock("nano", () => ({
     db: {
       use: () => ({
         get: async (id: string) => docs.get(id),
+        list: async () => ({ rows: [...docs.keys()].sort().map((id) => ({ id })) }),
         fetch: async ({ keys }: { keys: string[] }) => ({
           rows: keys.slice().reverse().map((id) => ({ doc: docs.get(id) })),
         }),
@@ -27,7 +29,8 @@ vi.mock("nano", () => ({
   }),
 }));
 vi.mock("../src/hugo/build.js", () => ({
-  runHugoBuild: async () => ({ ok: true, durationMs: 0 }),
+  verifyHugo: async () => {},
+  runHugoBuild: build,
 }));
 
 let root: string;
@@ -37,6 +40,7 @@ let stopFeed: (() => void) | undefined;
 beforeEach(async () => {
   vi.resetModules();
   docs.clear();
+  build.mockReset().mockResolvedValue({ ok: true, durationMs: 0 });
   events = new EventEmitter();
   reader.start.mockReturnValue(events);
   root = await mkdtemp(join(tmpdir(), "publisher-sync-test-"));
@@ -152,5 +156,110 @@ describe("published note updates", () => {
       await expect(readFile(join(root, "content/posts/post.md"), "utf8"))
         .rejects.toMatchObject({ code: "ENOENT" });
     });
+  });
+});
+
+describe("startup recovery rebuild", () => {
+  function postFixture(id: string, slug: string, images = "") {
+    const child = `h:${id}`;
+    return {
+      ...metadata, _id: id, path: id, children: [child],
+      eden: {
+        [child]: {
+          data: `---\npost_published: true\npost_slug: ${slug}\n---\nRECOVERED ${slug}\n${images}`,
+          epoch: 1,
+        },
+      },
+    };
+  }
+
+  it("restores damaged posts and cached images without touching untracked files", async () => {
+    docs.set("post.md", postFixture("post.md", "custom", "![[image.png]]"));
+    docs.set("image.png", {
+      _id: "image.png", type: "newnote", path: "image.png", mtime: 1,
+      children: ["h:image"], eden: { "h:image": { data: "AQID", epoch: 1 } },
+    });
+    const { Publisher } = await import("../src/publisher.js");
+    const { imageFilename } = await import("../src/markdown/images.js");
+    const post = join(root, "content/posts/custom.md");
+    const image = join(root, "images", imageFilename("image.png"));
+    const manual = join(root, "content/posts/manual.md");
+    await new Publisher().start(true);
+    await writeFile(post, "damaged markdown");
+    await writeFile(image, Buffer.from([9, 9, 9]));
+    await writeFile(manual, "handwritten content");
+    await writeFile(join(root, "state/refcount.json"), "invalid JSON");
+
+    await new Publisher().start(false);
+    expect(await readFile(post, "utf8")).toBe("damaged markdown");
+    expect(await readFile(image)).toEqual(Buffer.from([9, 9, 9]));
+
+    await new Publisher().start(true);
+    expect(await readFile(post, "utf8")).toContain("RECOVERED custom");
+    expect(await readFile(image)).toEqual(Buffer.from([1, 2, 3]));
+    expect(await readFile(manual, "utf8")).toBe("handwritten content");
+    expect(JSON.parse(await readFile(join(root, "state/refcount.json"), "utf8")))
+      .toEqual({ "image.png": 1 });
+
+    docs.set("post.md", postFixture("post.md", "renamed", "![[image.png]]"));
+    await new Publisher().start(true);
+    await expect(readFile(post)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(root, "content/posts/renamed.md"), "utf8"))
+      .toContain("RECOVERED renamed");
+  });
+
+  it("removes tracked stale output while protecting shared images and conflicted posts", async () => {
+    docs.set("kept.md", postFixture("kept.md", "kept", "![[shared.png]]"));
+    docs.set("deleted.md", postFixture("deleted.md", "custom-deleted", "![[shared.png]]\n![[orphan.png]]"));
+    docs.set("soft.md", postFixture("soft.md", "custom-soft"));
+    docs.set("draft.md", postFixture("draft.md", "custom-draft"));
+    docs.set("conflict.md", postFixture("conflict.md", "custom-conflict"));
+    for (const name of ["shared.png", "orphan.png"]) {
+      const child = `h:${name}`;
+      docs.set(name, {
+        _id: name, type: "newnote", path: name, children: [child],
+        eden: { [child]: { data: "AQID", epoch: 1 } },
+      });
+    }
+    const { Publisher } = await import("../src/publisher.js");
+    const { imageFilename } = await import("../src/markdown/images.js");
+    await new Publisher().start(true);
+    const untracked = join(root, "content/posts/deleted.md");
+    await writeFile(untracked, "handwritten tombstone-name content");
+    docs.delete("deleted.md");
+    docs.set("soft.md", { ...docs.get("soft.md"), deleted: true });
+    docs.set("draft.md", {
+      ...metadata, _id: "draft.md", path: "draft.md", children: [],
+    });
+    docs.set("conflict.md", { ...docs.get("conflict.md"), _conflicts: ["2-other"] });
+
+    const recovery = new Publisher();
+    await recovery.start(true);
+    await recovery.handleChange({ id: "deleted.md", deleted: true });
+    expect(await readFile(untracked, "utf8")).toBe("handwritten tombstone-name content");
+    for (const slug of ["custom-deleted", "custom-soft", "custom-draft"]) {
+      await expect(readFile(join(root, "content/posts", `${slug}.md`)))
+        .rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(await readFile(join(root, "content/posts/kept.md"), "utf8")).toContain("RECOVERED kept");
+    expect(await readFile(join(root, "content/posts/custom-conflict.md"), "utf8"))
+      .toContain("RECOVERED custom-conflict");
+    expect(await readFile(join(root, "images", imageFilename("shared.png"))))
+      .toEqual(Buffer.from([1, 2, 3]));
+    await expect(readFile(join(root, "images", imageFilename("orphan.png"))))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    expect(JSON.parse(await readFile(join(root, "state/refcount.json"), "utf8")))
+      .toEqual({ "shared.png": 1 });
+  });
+
+  it("fails startup when Hugo cannot complete the recovery build", async () => {
+    docs.set("post.md", postFixture("post.md", "post"));
+    const { Publisher } = await import("../src/publisher.js");
+    await new Publisher().start(true);
+    const checkpoint = join(root, "state/last_seq.json");
+    await writeFile(checkpoint, JSON.stringify({ seq: "saved-sequence" }));
+    build.mockResolvedValueOnce({ ok: false, durationMs: 0 });
+    await expect(new Publisher().start(true)).rejects.toBeInstanceOf(Error);
+    expect(JSON.parse(await readFile(checkpoint, "utf8"))).toEqual({ seq: "saved-sequence" });
   });
 });

@@ -7,10 +7,7 @@ import type { DocClass, Eden } from "./extractor/types.js";
 import { reconstructText } from "./extractor/reconstruct.js";
 import { getDoc, listAllDocIds } from "./couchdb/client.js";
 import { log } from "./logger.js";
-import {
-  processFrontmatter,
-  slugFromVaultPath,
-} from "./markdown/frontmatter.js";
+import { processFrontmatter } from "./markdown/frontmatter.js";
 import { processImages } from "./markdown/images.js";
 import { removePost, writePost } from "./markdown/writer.js";
 import {
@@ -18,6 +15,7 @@ import {
   clearPostRefs,
   loadAllRefsWithPostIds,
   loadPostRefs,
+  rebuildImageRefcounts,
 } from "./state/refs.js";
 import { Debouncer } from "./watcher/debouncer.js";
 import { runHugoBuild, verifyHugo } from "./hugo/build.js";
@@ -44,8 +42,13 @@ export class Publisher {
     await this.loadPostPaths();
 
     if (fullBootstrap) {
+      log.info({ posts: this.postPaths.size }, "startup_rebuild_started");
+      await rebuildImageRefcounts();
       await this.bootstrapPosts();
-      await runHugoBuild();
+      this.imageIndex.rebuildReverseFromRefs(await loadAllRefsWithPostIds());
+      const build = await runHugoBuild();
+      if (!build.ok) throw new Error("Startup Hugo rebuild failed");
+      log.info({}, "startup_rebuild_finished");
     }
 
     log.info({ fullBootstrap }, "publisher_ready");
@@ -91,7 +94,7 @@ export class Publisher {
         docPath ??
         (change.id.endsWith(".md") ? change.id : undefined);
       if (path) {
-        await this.unpublishPost(change.id, path);
+        await this.unpublishPost(change.id);
         this.scheduleBuild();
       }
       const imgPath =
@@ -185,16 +188,34 @@ export class Publisher {
 
   private async bootstrapPosts(): Promise<void> {
     for (const [id] of this.postPaths) {
-      await this.processDoc(id);
+      await this.processDoc(id, true);
+    }
+
+    for (const [id, refs] of await loadAllRefsWithPostIds()) {
+      if (this.postPaths.has(id)) continue;
+      const doc = await getDoc(id);
+      if (doc && classifyDoc(doc) === "post") {
+        await this.processDoc(id, true);
+        continue;
+      }
+      if (
+        doc && !doc.deleted && !doc._deleted &&
+        Array.isArray(doc._conflicts) && doc._conflicts.length > 0
+      ) {
+        log.warn({ docId: id }, "rebuild_conflict_skipped");
+        continue;
+      }
+      if (refs.slug) await removePost(refs.slug);
+      await clearPostRefs(id, (file) => this.removeImageFile(file));
     }
   }
 
-  private async processDoc(docId: string): Promise<void> {
+  private async processDoc(docId: string, forceImages = false): Promise<void> {
     const doc = await getDoc(docId);
     this.trackChunkParents(docId, doc ?? undefined);
     if (!doc) {
       const path = this.postPaths.get(docId);
-      if (path) await this.unpublishPost(docId, path);
+      if (path) await this.unpublishPost(docId);
       return;
     }
 
@@ -204,7 +225,7 @@ export class Publisher {
     this.postPaths.set(docId, path);
 
     if (doc._deleted || doc.deleted) {
-      await this.unpublishPost(docId, path);
+      await this.unpublishPost(docId);
       return;
     }
 
@@ -221,7 +242,7 @@ export class Publisher {
     );
 
     if (fm.skip) {
-      await this.unpublishPost(docId, path);
+      await this.unpublishPost(docId);
       log.info({ docId, reason: fm.reason }, "doc_skipped");
       return;
     }
@@ -232,7 +253,7 @@ export class Publisher {
       await removePost(oldRefs.slug);
     }
 
-    const images = await processImages(fm.content!, this.imageIndex);
+    const images = await processImages(fm.content!, this.imageIndex, forceImages);
     await writePost(slug, images.markdown);
 
     for (const imageId of images.imageDocIds) {
@@ -250,10 +271,9 @@ export class Publisher {
     }
   }
 
-  private async unpublishPost(docId: string, path: string): Promise<void> {
+  private async unpublishPost(docId: string): Promise<void> {
     const refs = await loadPostRefs(docId);
-    const slug = refs?.slug ?? slugFromVaultPath(path);
-    await removePost(slug);
+    if (refs?.slug) await removePost(refs.slug);
     this.postPaths.delete(docId);
     await clearPostRefs(docId, (file) => this.removeImageFile(file));
   }
